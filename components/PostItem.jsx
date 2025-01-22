@@ -1,114 +1,334 @@
-import React, { useEffect, useState } from 'react';
-import Link from 'next/link';
-import Badge from "./Badge";
+import React, { useEffect, useState, useRef } from "react";
+import Link from "next/link";
+import { User, useOrbis } from "@orbisclub/components";
+import { getIpfsLink } from "../utils";
+import { CommentsIcon } from "./Icons";
+import TimeAgo from 'javascript-time-ago';
+import en from 'javascript-time-ago/locale/en';
 import Upvote from "./Upvote";
-import ProofBadge from "./ProofBadge";
-import { User, UserBadge, useOrbis } from "@orbisclub/components";
-import { shortAddress } from "../utils";
-import { ExternalLinkIcon, CommentsIcon } from "./Icons";
-import UrlMetadata from "./UrlMetadata";
+import { marked } from "marked";
+import parse from "html-react-parser";
+import DOMPurify from "dompurify";
+import { FaShare, FaTag, FaEthereum, FaEllipsisH } from "react-icons/fa";
+import DonateButton from './DonateButton';
+import { isDonationEnabled } from '../config/categories';
+import useOutsideClick from "../hooks/useOutsideClick";
 
-export default function PostItem({post}) {
+// Initialize TimeAgo
+if (!TimeAgo.getDefaultLocale()) {
+  TimeAgo.addDefaultLocale(en);
+}
+
+const timeAgo = new TimeAgo('en-US');
+
+export default function PostItem({ post }) {
   const { orbis, user } = useOrbis();
   const [hasLiked, setHasLiked] = useState(false);
   const [updatedPost, setUpdatedPost] = useState(post);
+  const [showMenu, setShowMenu] = useState(false);
+  const [totalDonations, setTotalDonations] = useState({
+    ETH: 0,
+    USDT: 0,
+    USDC: 0
+  });
+  const menuRef = useRef(null);
 
+  useOutsideClick(menuRef, () => setShowMenu(false));
 
-  /** Check if user liked this post */
   useEffect(() => {
-    if(user) {
-      getReaction();
+    if (post) {
+      loadDonations();
+      checkReaction();
     }
+  }, [post]);
 
-    async function getReaction() {
-      let { data, error } = await orbis.getReaction(post.stream_id, user.did);
-      if(data && data.type && data.type == "like") {
+  async function loadDonations() {
+    try {
+      const { data: donations } = await orbis.getPosts({
+        context: post.stream_id,
+        only_master: false
+      });
+
+      const donationAmounts = {
+        ETH: 0,
+        USDT: 0,
+        USDC: 0
+      };
+
+      donations?.forEach(donation => {
+        if (donation.content?.data?.type === 'donation') {
+          const { amount, token } = donation.content.data;
+          if (donationAmounts.hasOwnProperty(token)) {
+            donationAmounts[token] += parseFloat(amount);
+          }
+        }
+      });
+
+      setTotalDonations(donationAmounts);
+    } catch (error) {
+      console.error("Error loading donations:", error);
+    }
+  }
+
+  async function checkReaction() {
+    if (user) {
+      let { data } = await orbis.getReaction(post.stream_id, user.did);
+      if (data && data.type === "like") {
         setHasLiked(true);
       }
     }
-  }, [user]);
+  }
 
-  /** Will like / upvote the post */
   async function like() {
-    if(user) {
+    if (user) {
       setHasLiked(true);
       setUpdatedPost({
         ...updatedPost,
-        count_likes: post.count_likes + 1
+        count_likes: post.count_likes + 1,
       });
-      let res = await orbis.react(
-        post.stream_id,
-        "like"
-      );
-      console.log("res:", res);
+      await orbis.react(post.stream_id, "like");
     } else {
       alert("You must be connected to react to posts.");
     }
   }
 
-  /** Will clean description by shortening it and remove some markdown structure */
-  function cleanDescription() {
-    if(post.content.body) {
-      let desc = post.content.body;
-      const regexImage = /\!\[Image ALT tag\]\((.*?)\)/;
-      const regexUrl = /\[(.*?)\]\(.*?\)/;
-      desc = desc.replace(regexImage, "");
-      desc = desc.replace(regexUrl, "$1");
-
-
-      if(desc) {
-        return desc.substring(0,180) + "...";
-      } else {
-        return null;
-      }
+  const handleShare = () => {
+    if (navigator.share) {
+      navigator.share({
+        title: post.content.title,
+        text: post.content.body,
+        url: window.location.href
+      });
     } else {
-      return null
+      navigator.clipboard.writeText(window.location.href);
+      alert("Link copied to clipboard!");
     }
-  }
+  };
+
+  const handleEmbedCopy = () => {
+    const embedCode = `<iframe 
+  src="${window.location.origin}/embed/${post.stream_id}"
+  width="100%"
+  height="400"
+  frameborder="0"
+  style="border: 1px solid #E5E7EB; border-radius: 8px;"
+  title="${post.content?.title || 'Embedded post'}"
+></iframe>`;
+  
+    try {
+      navigator.clipboard.writeText(embedCode);
+      alert("Embed code copied! You can now paste it into your website.");
+    } catch (err) {
+      console.error("Failed to copy embed code:", err);
+      // Fallback for browsers that don't support clipboard API
+      const textarea = document.createElement('textarea');
+      textarea.value = embedCode;
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand('copy');
+      document.body.removeChild(textarea);
+      alert("Embed code copied! You can now paste it into your website.");
+    }
+    setShowMenu(false);
+  };
+
+  const handleReport = async () => {
+    if (!user) {
+      alert("You must be connected to report posts.");
+      return;
+    }
+    
+    try {
+      await orbis.createPost({
+        context: "report",
+        body: "Post reported for review",
+        data: {
+          type: "report",
+          post_id: post.stream_id,
+          reason: "reported_by_user"
+        }
+      });
+      alert("Post has been reported. Thank you for helping keep the community safe.");
+    } catch (error) {
+      console.error("Error reporting post:", error);
+      alert("Failed to report post. Please try again.");
+    }
+    setShowMenu(false);
+  };
+
+  const handleMuteAuthor = async () => {
+    if (!user) {
+      alert("You must be connected to mute users.");
+      return;
+    }
+    
+    try {
+      // Store muted user in user's profile metadata
+      const currentProfile = user?.details?.profile || {};
+      const mutedUsers = currentProfile.mutedUsers || [];
+      
+      await orbis.updateProfile({
+        ...currentProfile,
+        mutedUsers: [...mutedUsers, post.creator_details.did]
+      });
+      
+      alert("Author has been muted.");
+    } catch (error) {
+      console.error("Error muting author:", error);
+      alert("Failed to mute author. Please try again.");
+    }
+    setShowMenu(false);
+  };
+
+  const formatDonation = (amount) => {
+    return parseFloat(amount).toFixed(4);
+  };
+
+  const calculateTotalUSD = () => {
+    const rates = {
+      ETH: 2000,
+      USDT: 1,
+      USDC: 1
+    };
+
+    return Object.entries(totalDonations).reduce((total, [token, amount]) => {
+      return total + (parseFloat(amount) * rates[token]);
+    }, 0);
+  };
+
+  const formatUSD = (amount) => {
+    return new Intl.NumberFormat('en-US', {
+      style: 'currency',
+      currency: 'USD'
+    }).format(amount);
+  };
+
+  // Check if this post's category should show donate button
+  const showDonateButton = isDonationEnabled(post.content?.context);
 
   return (
-    <div className="[&:nth-child(-n+4)]:-order-1 alte">
-      <div className="relative p-5 pl-0 flex flex-row items-start">
-        <Upvote like={like} active={hasLiked} count={updatedPost.count_likes} />
-        <div className="sm:flex items-center space-y-6 sm:space-y-0 sm:space-x-5">
-          <div className="grow text-primary lg:flex items-center justify-between space-y-5 lg:space-x-6 lg:space-y-0">
-            <div>
-              <div className="mb-2">
-                <h2 className="mb-1 alte">
-                  <Link className="text-primary text-base font-medium hover:underline" href={"/post/" + post.stream_id}>
-                    {post.content.title}
-                  </Link>
-                </h2>
-                <p className="text-sm text-tertiary alte">{cleanDescription()}</p>
-                {/** Display URL metadata if any */}
-                {post.indexing_metadata?.urlMetadata?.title &&
-                  <UrlMetadata showDesc={false} imgSize="10rem" metadata={post.indexing_metadata.urlMetadata} />
-                }
-              </div>
-              <div className="flex items-center text-sm text-secondary flex flex-row space-x-1.5">
-                <User details={post.creator_details} height={35} />
-                {/**<UserBadge details={post.creator_details}  />*/}
-                <span className="text-secondary">in</span>
-                {post.context_details?.context_details &&
-                  <Badge title={post.context_details.context_details.displayName ? post.context_details.context_details.displayName : post.context_details.context_details.name} color="bg-brand-400" />
-                }
-
-                <span className="hidden md:flex text-tertiary mr-2 ml-2">·</span>
-
-                {/** Show count replies if any */}
-                {(post.count_replies && post.count_replies > 0) ?
+    <div className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
+      <div className="p-6">
+        <div className="flex items-start space-x-4">
+          <Upvote like={like} active={hasLiked} count={updatedPost.count_likes || 0} />
+          
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center space-x-2">
+                <User details={post.creator_details} />
+                <span className="text-gray-300">•</span>
+                <span className="text-sm text-gray-500">
+                  {timeAgo.format(post.timestamp * 1000)}
+                </span>
+                {post.content?.context && (
                   <>
-                    <Link href={"/post/" + post.stream_id} className="hidden md:flex text-primary text-xs border border-primary px-2 py-1 font-medium text-xs items-center space-y-2 rounded-md hover:border hover:underline">{post.count_replies} <CommentsIcon style={{marginLeft: 3}} /></Link>
-                    <span className="hidden md:flex text-tertiary mr-2 ml-2">·</span>
+                    <span className="text-gray-300">•</span>
+                    <span className="inline-flex items-center text-sm text-gray-500">
+                      <FaTag className="mr-1" />
+                      {post.content.context}
+                    </span>
                   </>
-                :
-                  <></>
-                }
+                )}
+              </div>
 
-                {/** Proof link to Cerscan */}
-                {post.stream_id &&
-                  <ProofBadge stream_id={post.stream_id} />
-                }
+              {/* Three-dot menu */}
+              <div className="relative" ref={menuRef}>
+                <button
+                  onClick={() => setShowMenu(!showMenu)}
+                  className="p-1 rounded-full hover:bg-gray-100 transition-colors"
+                >
+                  <FaEllipsisH className="w-4 h-4 text-gray-500" />
+                </button>
+
+                {showMenu && (
+                  <div className="absolute right-0 mt-2 w-48 bg-white rounded-lg shadow-lg py-1 z-10 border border-gray-200">
+                    <button
+                      onClick={handleEmbedCopy}
+                      className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50"
+                    >
+                      Embed this post
+                    </button>
+                    <button
+                      onClick={handleReport}
+                      className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50"
+                    >
+                      Report post
+                    </button>
+                    <button
+                      onClick={handleMuteAuthor}
+                      className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50"
+                    >
+                      Mute author
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <Link href={"/post/" + post.stream_id}>
+              <h2 className="mt-2 text-xl font-semibold text-gray-900 hover:text-blue-600">
+                {post.content?.title}
+              </h2>
+            </Link>
+
+            <div className="mt-2 text-base text-gray-600 line-clamp-3">
+              {parse(DOMPurify.sanitize(marked(post.content?.body || '')))}
+            </div>
+
+            {post.content?.media && post.content.media[0] && (
+              <div className="mt-4">
+                <img
+                  src={getIpfsLink(post.content.media[0])}
+                  alt={post.content.title}
+                  className="rounded-lg max-h-96 object-cover"
+                />
+              </div>
+            )}
+
+            <div className="mt-4 flex items-center justify-between">
+              <div className="flex items-center space-x-4 text-sm text-gray-500">
+                <button 
+                  className="flex items-center hover:text-gray-700"
+                  onClick={() => window.location.href = `/post/${post.stream_id}#comments`}
+                >
+                  <CommentsIcon className="mr-1" />
+                  {post.count_replies || 0} Comments
+                </button>
+
+                <button 
+                  className="flex items-center hover:text-gray-700"
+                  onClick={handleShare}
+                >
+                  <FaShare className="mr-1" />
+                  Share
+                </button>
+
+                {showDonateButton && (
+                  <>
+                    <div className="flex items-center space-x-2">
+                      <span className="text-gray-500">Raised:</span>
+                      {Object.values(totalDonations).some(amount => amount > 0) ? (
+                        <div className="flex flex-wrap gap-2">
+                          {Object.entries(totalDonations).map(([token, amount]) => 
+                            amount > 0 && (
+                              <div key={token} className="flex items-center text-green-600">
+                                <FaEthereum className="mr-1" />
+                                <span>{formatDonation(amount)} {token}</span>
+                              </div>
+                            )
+                          )}
+                          <span className="text-gray-500">
+                            ({formatUSD(calculateTotalUSD())})
+                          </span>
+                        </div>
+                      ) : (
+                        <span className="text-gray-500">$0.00</span>
+                      )}
+                    </div>
+
+                    <DonateButton post={post} />
+                  </>
+                )}
               </div>
             </div>
           </div>
