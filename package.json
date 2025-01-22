@@ -13,6 +13,8 @@
     "@react-oauth/google": "^0.11.0",
     "@tailwindcss/forms": "^0.5.3",
     "@tailwindcss/typography": "^0.5.9",
+    "@walletconnect/ethereum-provider": "^2.17.5",
+    "@walletconnect/jsonrpc-http-connection": "^1.0.8",
     "dompurify": "^3.2.3",
     "eslint": "8.36.0",
     "eslint-config-next": "13.2.4",
